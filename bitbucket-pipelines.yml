@@ -1,0 +1,91 @@
+image: golang:1.15
+
+pipelines:
+  default:
+    - parallel:
+      - step:
+          name: Lint code
+          image: golangci/golangci-lint:v1.31.0
+          script:
+            - golangci-lint run -v
+
+      - step:
+          name: Run Security Check
+          script:
+            - set +e
+            - go get github.com/securego/gosec/cmd/gosec
+            - gosec ./...
+            - set -e
+          allow_failure: true
+
+      - step:
+          name: Lint the Dockerfile
+          image: hadolint/hadolint:latest-debian
+          script:
+            - set +e
+            - hadolint Dockerfile
+            - set -e
+
+    - step:
+        name: Docker Build
+        image: atlassian/default-image:3
+        script:
+          - IMAGE_NAME=$BITBUCKET_REPO_SLUG
+          - docker build . --file Dockerfile --tag ${IMAGE_NAME}
+          - docker save ${IMAGE_NAME} --output "${IMAGE_NAME}.tar"
+        services:
+          - docker
+        caches:
+          - docker
+        artifacts:
+            - "*.tar"
+
+    - step:
+          name: Docker Push
+          script:
+            - echo ${DOCKERHUB_PASSWORD} | docker login --username "$DOCKERHUB_NAME" --password-stdin
+            - IMAGE_NAME=$BITBUCKET_REPO_SLUG
+            - docker load --input "${IMAGE_NAME}.tar"
+            - VERSION="prod-0.1.${BITBUCKET_BUILD_NUMBER}"
+            - IMAGE=${DOCKERHUB_NAME}/${IMAGE_NAME}
+            - docker tag "${IMAGE_NAME}" "${IMAGE}:${VERSION}"
+            - docker push "${IMAGE}:${VERSION}"
+          services:
+            - docker
+
+    - step:
+        name: Deploy to EKS
+        image: bearengineer/awscli-kubectl
+        script:
+          # Set AWS credentials as environment variables
+          - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+          - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+          - export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION
+          # Authenticate with EKS
+          - aws eks update-kubeconfig --name veralevel
+          # Run kubectl commands for cross check
+          - kubectl get pods -n kube-system
+          #set image vars
+          - VERSION="prod-0.1.${BITBUCKET_BUILD_NUMBER}"
+          - IMAGE=${DOCKERHUB_NAME}/${BITBUCKET_REPO_SLUG}
+          - export Repo_Location=${IMAGE}:${VERSION}
+          - echo "Repo Location Value is ${Repo_Location}"
+          - curl -L https://github.com/a8m/envsubst/releases/download/v1.2.0/envsubst-`uname -s`-`uname -m` -o envsubst
+          - chmod +x envsubst
+          - mv envsubst /usr/local/bin
+          # Deploy Kubernetes golang App
+          - envsubst < kubernetes/manifests/deploy.yaml | kubectl apply -f -
+        services:
+            - docker
+
+#      # - step:
+#      #     name: test
+#      #     script:
+#      #       - VERSION="prod-0.1.${BITBUCKET_BUILD_NUMBER}"
+#      #       - IMAGE=${DOCKERHUB_NAME}/${BITBUCKET_REPO_SLUG}
+#      #       - export Repo_Location=${IMAGE}:${VERSION}
+#      #       - echo "Deploying ${Repo_Location} to Kubernetes.."
+
+
+
+#     
